@@ -5,7 +5,7 @@ from datetime import datetime
 
 # === 📦 Ensure local import works regardless of how script is run ===
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from . import config
+import config
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -48,7 +48,7 @@ def fetch_audio_files(drive_service):
 
 # === 📄 CHECK WHICH FILES TO PROCESS ===
 def get_new_files(supabase: Client, drive_files):
-    log("🧾 Checking against existing DB records...")
+    log("🗾 Checking against existing DB records...")
     db_files = supabase.table('audio_files').select('filename').execute()
     db_filenames = {record['filename'] for record in db_files.data}
     return [f for f in drive_files if f['name'] not in db_filenames]
@@ -61,10 +61,10 @@ def run_step(script: str) -> bool:
         subprocess.run([VENV_PYTHON, script_path], check=True)
         return True
     except subprocess.CalledProcessError:
-        log(f"🛑 Pipeline stopped: {script} did not process any files or failed.")
+        log(f"😛 Pipeline stopped: {script} did not process any files or failed.")
         return False
     except FileNotFoundError:
-        log(f"🛑 Script not found: {script_path}")
+        log(f"😛 Script not found: {script_path}")
         return False
 
 # === 🚀 MAIN ===
@@ -86,10 +86,10 @@ def main():
         return
 
     if not new_files:
-        log("📭 No new files to process. Exiting.")
+        log("📟 No new files to process. Exiting.")
         return
 
-    log(f"🆕 Found {len(new_files)} new file(s). Running pipeline...")
+    log(f"🔟 Found {len(new_files)} new file(s). Running pipeline...")
 
     steps = [
         "monitor.py",
