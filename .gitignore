@@ -1,21 +1,25 @@
 # Python virtual environments
 venv310/
-
-# Python artifacts
+.env/
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-*.so
-*.dylib
 
-# Log files
-*.log
-
-# macOS system file
+# System files
 .DS_Store
 
-# Credentials or config files (optional, if handled elsewhere)
+# Logs and outputs
+*.log
+log.txt
+*.out
+
+# Large files
+*.dylib
+*.so
+*.pkl
+*.mp3
+*.m4a
+*.wav
+
+# Credentials (NEVER commit these)
 credentials/
 config.py
-
