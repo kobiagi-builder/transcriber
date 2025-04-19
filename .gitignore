@@ -1,0 +1,21 @@
+# Python virtual environments
+venv310/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dylib
+
+# Log files
+*.log
+
+# macOS system file
+.DS_Store
+
+# Credentials or config files (optional, if handled elsewhere)
+credentials/
+config.py
+
