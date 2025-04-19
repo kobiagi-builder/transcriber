@@ -1,18 +1,29 @@
 import os
+import sys
 import subprocess
 from datetime import datetime
+
+# === 📦 Ensure local import works regardless of how script is run ===
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from . import config
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from supabase import create_client, Client
-import config
-import sys
 
-# Ensures subprocesses run in the same Python environment
+# Path to the venv Python
 VENV_PYTHON = "/Users/kobiagi/Documents/Transcriber/venv310/bin/python"
 
 # === 🕒 Logger ===
 def log(msg):
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    formatted = f"[{timestamp}] {msg}"
+    print(formatted)
+    try:
+        with open("log.txt", "a") as f:
+            f.write(formatted + "\n")
+    except Exception as e:
+        print(f"[Logger Error] Could not write to log.txt: {e}")
 
 # === 🔌 INIT GOOGLE DRIVE ===
 def init_drive_service():
@@ -44,7 +55,7 @@ def get_new_files(supabase: Client, drive_files):
 
 # === ▶️ RUN PIPELINE STEP ===
 def run_step(script: str) -> bool:
-    script_path = os.path.join("/Users/kobiagi/Documents/Transcriber", script)
+    script_path = os.path.join(os.path.dirname(__file__), script)
     log(f"▶️ Running {script}...")
     try:
         subprocess.run([VENV_PYTHON, script_path], check=True)
@@ -60,11 +71,19 @@ def run_step(script: str) -> bool:
 def main():
     log("🔍 Checking Google Drive for new audio files...")
 
-    drive_service = init_drive_service()
-    supabase = init_supabase()
+    try:
+        drive_service = init_drive_service()
+        supabase = init_supabase()
+    except Exception as e:
+        log(f"❌ Error initializing services: {e}")
+        return
 
-    drive_files = fetch_audio_files(drive_service)
-    new_files = get_new_files(supabase, drive_files)
+    try:
+        drive_files = fetch_audio_files(drive_service)
+        new_files = get_new_files(supabase, drive_files)
+    except Exception as e:
+        log(f"❌ Error during file fetch/check: {e}")
+        return
 
     if not new_files:
         log("📭 No new files to process. Exiting.")
@@ -88,5 +107,6 @@ def main():
 
     log("✅ Pipeline completed successfully!")
 
+# === ENTRY POINT ===
 if __name__ == '__main__':
     main()
