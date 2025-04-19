@@ -24,3 +24,5 @@ log.txt
 credentials/
 config.py
 Terminal Saved Output.txt
+Credentials/*.json
+
