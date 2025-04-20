@@ -1,89 +1,73 @@
-import openai
+# clean_text.py — Updates cleaned_text column, not cleaned_transcription
+
+import os
+import sys
+from datetime import datetime
 from supabase import create_client
-from config import SUPABASE_URL, SUPABASE_API_KEY, OPENAI_API_KEY
+import config
+import re
 
-# ------------------------------------------------------
-# 🔐 Set up API clients
-# ------------------------------------------------------
-openai.api_key = OPENAI_API_KEY
-supabase = create_client(SUPABASE_URL, SUPABASE_API_KEY)
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# ------------------------------------------------------
-# 🧠 Prompt to clean transcription
-# ------------------------------------------------------
-therapist_prompt = (
-    "You are a linguistic therapist expert in understanding text that was written by people with cognitive issues. "
-    "Your task is:\n"    
-    "1. Read the whole text and understand its concepts.\n"
-    "2. Correct the text so it will be linguistically, cognitively and logically correct.\n" 
-    "After this step every word, sequence of words and sentance will make sense and be correct linguistically and cognitively\n"
-    "The output must not include any preface or suffix. It will include only a corrected version of the text.\n"
-    "Do not change the text content - Just make it correct linguistically."
-)
+# === 🕒 Logger ===
+def log(msg):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    formatted = f"[{timestamp}] {msg}"
+    print(formatted)
+    try:
+        with open("log.txt", "a") as f:
+            f.write(formatted + "\n")
+    except Exception as e:
+        print(f"[Logger Error] Could not write to log file: {e}")
 
-# ------------------------------------------------------
-# 🧠 Run GPT-4-Turbo to clean the transcription
-# ------------------------------------------------------
-def gpt_clean_text(text):
-    response = openai.ChatCompletion.create(
-        model="gpt-4-turbo",  # Fast, supports long input, high quality
-        messages=[
-            {"role": "system", "content": therapist_prompt},
-            {"role": "user", "content": text}
-        ],
-        temperature=0.5
-    )
-    return response.choices[0].message.content.strip()
+# === 🔌 Init Supabase ===
+def init_supabase():
+    return create_client(config.SUPABASE_URL, config.SUPABASE_API_KEY)
 
-# ------------------------------------------------------
-# 🚀 Main logic: fetch, validate, clean, update
-# ------------------------------------------------------
+# === 🧹 Clean Transcript ===
+def clean_transcript(text):
+    # Basic cleanup: remove filler words and repeated punctuation
+    text = re.sub(r"\b(um+|uh+|like|you know)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\.{2,}", ".", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+# === 🚀 Main ===
 def main():
-    print("📦 Fetching records with status='transcribed' or 'error'...")
-    
-    # Include error records so we can retry failed ones
-    records = supabase.table("audio_files").select("*").in_("status", ["transcribed", "error"]).execute()
+    log("🧹 Starting transcript cleaning...")
+    sb = init_supabase()
 
-    if not records.data:
-        print("🟡 No files to clean.")
+    log("📦 Fetching records with status='transcribed' or 'error'...")
+    records = sb.table("audio_files").select("id, filename, transcription, status").in_("status", ["transcribed", "error"]).execute().data
+
+    if not records:
+        log("🟡 No records to clean.")
         return
 
-    for record in records.data:
+    for record in records:
+        file_id = record["id"]
         filename = record["filename"]
         raw_text = record.get("transcription")
 
-        # ✅ Skip if transcription is missing
         if not raw_text:
-            print(f"⚠️ Skipping {filename} — no transcription data found.")
+            log(f"⚠️ Skipping {filename} — no transcription found.")
             continue
 
-        print(f"\n🧼 Cleaning transcription for: {filename}")
-
         try:
-            # 🧠 Clean the text with GPT-4-Turbo
-            cleaned_text = gpt_clean_text(raw_text)
-
-            # ✅ Update Supabase with cleaned result and mark as 'cleaned'
-            supabase.table("audio_files").update({
-                "transcription_clean": cleaned_text,
+            cleaned = clean_transcript(raw_text)
+            sb.table("audio_files").update({
                 "status": "cleaned",
-                "error_message": None  # clear old errors if any
-            }).eq("filename", filename).execute()
-
-            print("✅ Cleaned and updated successfully.")
-
+                "cleaned_text": cleaned
+            }).eq("id", file_id).execute()
+            log(f"✅ Cleaned: {filename}")
         except Exception as e:
-            # ❌ If it fails, log error and preserve for retry
-            print(f"❌ Error cleaning {filename}: {e}")
-            supabase.table("audio_files").update({
+            log(f"❌ Error cleaning {filename}: {type(e).__name__}: {str(e)}")
+            sb.table("audio_files").update({
                 "status": "error",
                 "error_message": str(e)
-            }).eq("filename", filename).execute()
+            }).eq("id", file_id).execute()
 
-    print("\n✅ Step 2 Complete: Cleaning process finished.")
+    log("✅ Step 2 Complete: Cleaning process finished.")
 
-# ------------------------------------------------------
-# 🏁 Run when executed directly
-# ------------------------------------------------------
 if __name__ == "__main__":
     main()

@@ -1,133 +1,120 @@
-import openai
+# summarize.py — FINAL patched version using cleaned_text and status=cleaned
+
+import os
+import sys
+from datetime import datetime
 from supabase import create_client
-from config import SUPABASE_URL, SUPABASE_API_KEY, OPENAI_API_KEY
+import openai
+from openai.error import OpenAIError
+import config
 
-# ------------------------------------------------------
-# 🔐 API Initialization
-# ------------------------------------------------------
-openai.api_key = OPENAI_API_KEY
-supabase = create_client(SUPABASE_URL, SUPABASE_API_KEY)
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# ------------------------------------------------------
-# 🧠 Prompt: Executive Assistant-style summarizer
-# ------------------------------------------------------
-summary_prompt = (
-    "You are a laser-sharp executive assistant.\n"
-    "Your task is to create a summary of the text as follows:\n"
-    "* Main talking points\n"
-    "* Action items\n\n"
-    "Example:\n"
-    "Input: I went to the garden and picked a flower. I'll put it in the vase.\n"
-    "Result:\n"
-    "Main talking points:\n"
-    "* A walk in the garden\n"
-    "Action items:\n"
-    "* Put the flower in the vase."
-)
+# === 🕒 Logger ===
+def log(msg):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    formatted = f"[{timestamp}] {msg}"
+    print(formatted)
+    try:
+        with open("log.txt", "a") as f:
+            f.write(formatted + "\n")
+    except Exception as e:
+        print(f"[Logger Error] Could not write to log.txt: {e}")
 
-# ------------------------------------------------------
-# 🧠 GPT-4-Turbo Summarization Function
-# ------------------------------------------------------
-def gpt_generate_summary(text):
-    response = openai.ChatCompletion.create(
-        model="gpt-4-turbo",  # Use GPT-4-Turbo for speed + quality
-        messages=[
-            {"role": "system", "content": summary_prompt},
-            {"role": "user", "content": text}
-        ],
-        temperature=0.3
+# === 🔌 Init Supabase ===
+def init_supabase():
+    return create_client(config.SUPABASE_URL, config.SUPABASE_API_KEY)
+
+# === 🔌 Init OpenAI ===
+openai.api_key = config.OPENAI_API_KEY
+
+# === 📄 Parse GPT Output ===
+def parse_summary_output(output):
+    try:
+        lines = output.strip().split("\n")
+        action_items, talking_points = [], []
+        section = None
+        for line in lines:
+            if "action items" in line.lower():
+                section = "actions"
+                continue
+            elif "main talking points" in line.lower():
+                section = "points"
+                continue
+            elif not line.strip():
+                continue
+            if section == "actions":
+                action_items.append(line.strip("-• "))
+            elif section == "points":
+                talking_points.append(line.strip("-• "))
+        return action_items, talking_points
+    except Exception as e:
+        log(f"⚠️ Failed to parse summary output: {e}")
+        return [], []
+
+# === 🧠 Summarize Text ===
+def summarize_text(text):
+    prompt = (
+        "You are a business productivity assistant. "
+        "Summarize the following text into two sections: Main Talking Points and Action Items.\n\n"
+        f"Text: \n{text}\n\n"
+        "Respond in markdown with clear bullet points under each section."
     )
-    return response.choices[0].message.content.strip()
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+        )
+        return response.choices[0].message.content.strip()
+    except OpenAIError as e:
+        log(f"❌ OpenAI API error: {e}")
+        return None
 
-# ------------------------------------------------------
-# 🔍 Split summary output into two fields (bullets, dashes, numbers)
-# ------------------------------------------------------
-def split_summary(gpt_output):
-    summary = []
-    actions = []
-    section = None
-
-    for line in gpt_output.splitlines():
-        line = line.strip()
-
-        # Detect section headers
-        if line.lower().startswith("main talking points"):
-            section = "summary"
-            continue
-        if line.lower().startswith("action items"):
-            section = "actions"
-            continue
-
-        # Match bullet formats: -, *, 1. etc.
-        if section == "summary" and line:
-            if line.startswith(("-", "*")) or line[:2].isdigit():
-                summary.append(line)
-        elif section == "actions" and line:
-            if line.startswith(("-", "*")) or line[:2].isdigit():
-                actions.append(line)
-
-    # Fallback: return entire GPT output if we couldn't parse cleanly
-    if not summary and not actions:
-        print("⚠️ Could not parse sections. Saving full output in summary_points only.")
-        return gpt_output.strip(), ""
-
-    return "\n".join(summary), "\n".join(actions)
-
-# ------------------------------------------------------
-# 🚀 Main process to summarize eligible records
-# ------------------------------------------------------
+# === 🚀 Main ===
 def main():
-    print("📦 Fetching records with status='cleaned' or 'error'...")
+    log("📦 Fetching records with status='cleaned' or 'summary_error'...")
+    sb = init_supabase()
+    records = sb.table("audio_files").select("id, filename, cleaned_text, status").in_("status", ["cleaned", "summary_error"]).execute().data
 
-    # Fetch all cleaned or previously failed records for retry
-    records = supabase.table("audio_files").select("*").in_("status", ["cleaned", "error"]).execute()
-
-    if not records.data:
-        print("🟡 No files to summarize.")
+    if not records:
+        log("🟡 No cleaned records to summarize.")
         return
 
-    for record in records.data:
+    for record in records:
+        file_id = record["id"]
         filename = record["filename"]
-        clean_text = record.get("transcription_clean")
+        text = record.get("cleaned_text")
 
-        # ✅ Skip if transcription_clean is missing
-        if not clean_text:
-            print(f"⚠️ Skipping {filename} — no cleaned transcription found.")
+        if not text:
+            log(f"⚠️ Skipping {filename} — no cleaned text found.")
             continue
 
-        print(f"\n🧠 Summarizing: {filename}")
+        log(f"🧠 Summarizing: {filename}")
+        summary = summarize_text(text)
 
-        try:
-            # 🔁 Get summary from GPT
-            summary_output = gpt_generate_summary(clean_text)
+        if not summary:
+            sb.table("audio_files").update({"status": "summary_error"}).eq("id", file_id).execute()
+            continue
 
-            # 📤 Print GPT output (for debug)
-            print(f"📤 GPT Output:\n{summary_output}\n")
+        action_items, talking_points = parse_summary_output(summary)
 
-            # ✂️ Extract summary + action items
-            summary_points, action_items = split_summary(summary_output)
-
-            # 💾 Update Supabase
-            supabase.table("audio_files").update({
-                "summary_points": summary_points,
-                "action_items": action_items,
+        if action_items and talking_points:
+            sb.table("audio_files").update({
                 "status": "summarized",
-                "error_message": None
-            }).eq("filename", filename).execute()
+                "summary_points": talking_points,
+                "action_items": action_items,
+                "full_summary": summary
+            }).eq("id", file_id).execute()
+            log(f"✅ Summary complete for: {filename}")
+        else:
+            log(f"⚠️ Failed to extract bullet points for {filename}, saving raw summary.")
+            sb.table("audio_files").update({
+                "status": "summary_error",
+                "full_summary": summary
+            }).eq("id", file_id).execute()
 
-            print("✅ Summary saved to database.")
+    log("✅ Step Complete: Summarization finished.")
 
-        except Exception as e:
-            print(f"❌ Error summarizing {filename}: {e}")
-            supabase.table("audio_files").update({
-                "status": "error",
-                "error_message": str(e)
-            }).eq("filename", filename).execute()
-
-    print("\n✅ Step 3 Complete: Summarization finished.")
-
-# ------------------------------------------------------
-# 🏁 Run the script
-# ------------------------------------------------------
 if __name__ == "__main__":
     main()

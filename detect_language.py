@@ -1,16 +1,27 @@
 import os
-import io
+import tempfile
+import traceback
+from datetime import datetime
+
 import whisper
-from googleapiclient.http import MediaIoBaseDownload
+from supabase import create_client
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from supabase import create_client
-from config import SUPABASE_URL, SUPABASE_API_KEY, INPUT_FOLDER_ID, SERVICE_ACCOUNT_FILE
+from googleapiclient.http import MediaIoBaseDownload
+import io
 
-# Initialize Supabase client for database interaction
-supabase = create_client(SUPABASE_URL, SUPABASE_API_KEY)
+from config import SUPABASE_URL, SUPABASE_API_KEY, SERVICE_ACCOUNT_FILE, INPUT_FOLDER_ID
 
-# Set up and return Google Drive service client
+# === Logging ===
+def log(msg):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] {msg}")
+
+# === Initialize Supabase ===
+def init_supabase():
+    return create_client(SUPABASE_URL, SUPABASE_API_KEY)
+
+# === Initialize Google Drive API ===
 def init_drive_service():
     creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE,
@@ -18,84 +29,87 @@ def init_drive_service():
     )
     return build("drive", "v3", credentials=creds)
 
-# Download a specific file by name from the Google Drive input folder
-def download_file(service, filename):
-    # Get list of all files in the specified input folder
-    results = service.files().list(
-        q=f"'{INPUT_FOLDER_ID}' in parents and trashed = false",
-        fields="files(id, name)",
-        spaces="drive"
+# === Download File from Google Drive ===
+def download_from_drive(filename, drive_service, download_path="downloads"):
+    log(f"🔽 Downloading from Drive: {filename}")
+    query = f"name='{filename}' and '{INPUT_FOLDER_ID}' in parents and trashed = false"
+    results = drive_service.files().list(
+        q=query,
+        fields="files(id, name)"
     ).execute()
 
-    files = results.get("files", [])
-    
-    # Find the matching file and download it
-    for f in files:
-        if f["name"] == filename:
-            request = service.files().get_media(fileId=f["id"])
-            fh = io.FileIO(filename, "wb")
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while done is False:
-                status, done = downloader.next_chunk()
-            return filename
-    return None
+    items = results.get("files", [])
+    if not items:
+        raise FileNotFoundError(f"No file found in Drive with name: {filename}")
 
-# Main logic of the language detection script
+    file_id = items[0]['id']
+    request = drive_service.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+        log(f"⬇️ Download progress: {int(status.progress() * 100)}%")
+
+    os.makedirs(download_path, exist_ok=True)
+    local_path = os.path.join(download_path, filename)
+    with open(local_path, "wb") as f:
+        f.write(fh.getvalue())
+
+    return local_path
+
+# === Detect Language ===
+def detect_language(audio_path):
+    model = whisper.load_model("medium")  # Change to "large-v3" if you want more accuracy
+    result = model.transcribe(audio_path, task="transcribe", fp16=False)
+    return result.get("language", "unknown")
+
+# === Main ===
 def main():
-    print("🧠 Loading Whisper model...")
-    model = whisper.load_model("base")  # Use a small but accurate model
-
-    print("📦 Connecting to Supabase...")
-    # Get all records where audio files are ready for language detection
-    records = supabase.table("audio_files").select("*").in_("status", ["new", "error"]).execute()
-    print(f"🔎 Found {len(records.data)} file(s) to process.")
-
-    if not records.data:
-        print("🟡 No new audio files found.")
-        return
-
-    # Initialize the Drive API client
+    log("🧠 Loading Whisper model...")
+    supabase = init_supabase()
     drive_service = init_drive_service()
 
-    # Process each new audio file
-    for record in records.data:
-        filename = record["filename"]
-        print(f"\n🎧 Processing: {filename}")
+    log("📦 Connecting to Supabase...")
+    response = supabase.table("audio_files").select("id, filename").eq("status", "new").execute()
+    rows = response.data or []
+    log(f"🔎 Found {len(rows)} file(s) to process.")
 
+    for row in rows:
+        filename = row["filename"]
+        log(f"\n🎧 Processing: {filename}")
+
+        temp_audio = None
         try:
-            # Download audio file from Google Drive
-            local_path = download_file(drive_service, filename)
-            if not local_path:
-                raise Exception("File not found in Drive")
+            log("🔍 Detecting language...")
+            temp_audio = download_from_drive(filename, drive_service)
+            lang = detect_language(temp_audio)
 
-            # Run Whisper language detection
-            print("🔍 Detecting language...")
-            result = model.transcribe(local_path, task="transcribe", language=None)
-
-            # Extract detected language from result
-            detected_lang = result["language"]
-            print(f"🌍 Detected language: {detected_lang}")
-
-            # Update record in Supabase
             supabase.table("audio_files").update({
-                "language": detected_lang,
-                "status": "language_detected"
-            }).eq("filename", filename).execute()
+                "language": lang,
+                "status": "language_detected",
+                "error_message": ""
+            }).eq("id", row["id"]).execute()
 
-            # Remove the downloaded file from local storage
-            os.remove(local_path)
-
+            log(f"✅ Language detected: {lang}")
         except Exception as e:
-            # On error, update the record with status = error and log message
-            print(f"❌ Error processing {filename}: {e}")
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            log(f"❌ Error processing {filename}: {error_msg}")
+            log(traceback.format_exc())
+
             supabase.table("audio_files").update({
                 "status": "error",
-                "error_message": str(e)
-            }).eq("filename", filename).execute()
+                "error_message": error_msg
+            }).eq("id", row["id"]).execute()
+        finally:
+            try:
+                if temp_audio and os.path.exists(temp_audio):
+                    os.remove(temp_audio)
+            except Exception:
+                pass
 
-    print("\n✅ Language detection complete.")
+    log("✅ Language detection complete.")
 
-# Run the main function
 if __name__ == "__main__":
     main()

@@ -1,25 +1,53 @@
 import subprocess
-import sys
+import os
+from datetime import datetime
 
-# Ordered list of pipeline scripts
-pipeline = [
-    "monitor.py",          # Step 1: Watch Drive for new audio files
-    "detect_language.py",  # Step 2: Detect spoken language using Whisper
-    "transcribe.py",       # Step 3: Transcribe audio
-    "clean_text.py",       # Step 4: Clean transcription with GPT
-    "summarize.py",        # Step 5: Summarize and extract action items with GPT
-    "create_doc.py"        # Step 6: Create Google Doc and update Supabase
-]
+# === 🕒 Logger ===
+def log(msg):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[{timestamp}] {msg}"
+    print(formatted)
+    try:
+        with open("log.txt", "a") as f:
+            f.write(formatted + "\n")
+    except Exception as e:
+        print(f"[Logger Error] Could not write to log.txt: {e}")
 
-# Execute each step in sequence
-for script in pipeline:
-    print(f"\n▶️ Running {script}...")
-    
-    result = subprocess.run(["python", script])
+# === ▶️ RUN STEP ===
+def run_step(script):
+    log(f"\n▶️ Running {script}...")
+    try:
+        result = subprocess.run(["python", script], check=True)
+        return result.returncode == 0
+    except subprocess.CalledProcessError:
+        log(f"🛑 Pipeline stopped: {script} did not process any files or failed.")
+        return False
+    except FileNotFoundError:
+        log(f"🛑 Script not found: {script}")
+        return False
 
-    # If the script exits with a non-zero code, stop the pipeline
-    if result.returncode != 0:
-        print(f"\n🛑 Pipeline stopped: {script} did not process any files or failed.")
-        sys.exit(1)
+# === 🚀 MAIN ===
+def main():
+    log("\n🔍 Checking Google Drive for new audio files...")
+    check = run_step("monitor.py")
+    if not check:
+        log("❌ Halting pipeline due to failure in: monitor.py")
+        return
 
-print("\n✅ Pipeline complete: All steps ran successfully.")
+    steps = [
+        "detect_language.py",
+        "transcribe.py",
+        "clean_text.py",
+        "summarize.py",
+        "create_doc.py"
+    ]
+
+    for step in steps:
+        if not run_step(step):
+            log(f"❌ Halting pipeline due to failure in: {step}")
+            return
+
+    log("✅ Pipeline completed successfully!")
+
+if __name__ == '__main__':
+    main()

@@ -1,117 +1,128 @@
+# transcribe.py — Refactored to include language detection via Whisper
+
 import os
+import sys
 import io
 import whisper
+from datetime import datetime
+from supabase import create_client
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from supabase import create_client
-from config import SUPABASE_URL, SUPABASE_API_KEY, INPUT_FOLDER_ID, SERVICE_ACCOUNT_FILE
 
-# --------------------------------------------
-# 🔗 Initialize Supabase connection
-# --------------------------------------------
-supabase = create_client(SUPABASE_URL, SUPABASE_API_KEY)
+import config
 
-# --------------------------------------------
-# 🔗 Set up Google Drive API connection
-# --------------------------------------------
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# === 🕒 Logger ===
+def log(msg):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    formatted = f"[{timestamp}] {msg}"
+    print(formatted)
+    try:
+        with open("log.txt", "a") as f:
+            f.write(formatted + "\n")
+    except Exception as e:
+        print(f"[Logger Error] Could not write to log.txt: {e}")
+
+# === 🔌 INIT SERVICES ===
+def init_supabase():
+    return create_client(config.SUPABASE_URL, config.SUPABASE_API_KEY)
+
 def init_drive_service():
     creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
+        config.SERVICE_ACCOUNT_FILE,
         scopes=["https://www.googleapis.com/auth/drive"]
     )
     return build("drive", "v3", credentials=creds)
 
-# --------------------------------------------
-# 📥 Download an audio file if not already local
-# --------------------------------------------
-def download_file(service, filename):
-    # Check if file is already downloaded
-    if os.path.exists(filename):
-        print(f"📂 Using local copy of {filename}")
-        return filename
-
-    print(f"⏬ Downloading {filename} from Google Drive...")
-
-    # List files in the specified Drive folder
-    results = service.files().list(
-        q=f"'{INPUT_FOLDER_ID}' in parents and trashed = false",
-        fields="files(id, name)",
-        spaces="drive"
+# === 🔽 DOWNLOAD AUDIO FROM DRIVE ===
+def download_from_drive(filename, drive_service, download_path="downloads"):
+    log(f"🔽 Downloading from Drive: {filename}")
+    query = f"name='{filename}' and '{config.INPUT_FOLDER_ID}' in parents and trashed = false"
+    results = drive_service.files().list(
+        q=query,
+        fields="files(id, name)"
     ).execute()
 
-    files = results.get("files", [])
+    items = results.get("files", [])
+    if not items:
+        raise FileNotFoundError(f"No file found in Drive with name: {filename}")
 
-    # Search for the matching file by name
-    for f in files:
-        if f["name"] == filename:
-            request = service.files().get_media(fileId=f["id"])
-            fh = io.FileIO(filename, "wb")
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
-            return filename
+    file_id = items[0]['id']
+    request = drive_service.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
 
-    # File not found in Drive
-    return None
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+        log(f"⬇️ Download progress: {int(status.progress() * 100)}%")
 
-# --------------------------------------------
-# 🧠 Main Transcription Logic
-# --------------------------------------------
+    os.makedirs(download_path, exist_ok=True)
+    local_path = os.path.join(download_path, filename)
+    with open(local_path, "wb") as f:
+        f.write(fh.getvalue())
+
+    return local_path
+
+# === 🧠 TRANSCRIBE + DETECT LANGUAGE ===
+def transcribe_audio(model, file_path):
+    try:
+        result = model.transcribe(file_path, fp16=False)
+        return result["text"], result.get("language", "unknown")
+    except Exception as e:
+        log(f"❌ Transcription failed for {file_path}: {e}")
+        return None, None
+
+# === 🚀 MAIN ===
 def main():
-    print("🎙️ Loading Whisper model...")
-    model = whisper.load_model("large-v2")
+    log("🎙️ Loading Whisper model...")
+    model = whisper.load_model("large-v3")  # or "medium" for CPU-friendly
 
-    print("📦 Fetching records with status = 'language_detected'...")
-    # Get all audio files ready for transcription
-    records = supabase.table("audio_files").select("*").eq("status", "language_detected").execute()
-
-    if not records.data:
-        print("🟡 No files ready for transcription.")
-        return
-
-    # Initialize Google Drive client
+    log("📦 Connecting to Supabase...")
+    supabase = init_supabase()
     drive_service = init_drive_service()
 
-    # Loop through each file needing transcription
-    for record in records.data:
-        filename = record["filename"]
-        language = record["language"]
-        print(f"\n🎧 Transcribing: {filename} | Language: {language}")
+    result = supabase.table("audio_files").select("id", "filename", "status").eq("status", "new").execute()
+    files = result.data if result.data else []
+
+    if not files:
+        log("🟡 No new files to transcribe.")
+        return
+
+    for file in files:
+        filename = file['filename']
+        file_id = file['id']
+        log(f"🔤 Transcribing: {filename}")
 
         try:
-            # Step 1: Download the audio file
-            local_path = download_file(drive_service, filename)
-            if not local_path:
-                raise Exception("File not found in Drive.")
-
-            # Step 2: Transcribe using Whisper
-            result = model.transcribe(local_path, language=language)
-            transcription_text = result["text"]
-            print("📝 Transcription complete.")
-
-            # Step 3: Update Supabase with raw transcription
-            supabase.table("audio_files").update({
-                "transcription": transcription_text,
-                "status": "transcribed"  # Now ready for text cleaning
-            }).eq("filename", filename).execute()
-
-            # Step 4: Remove temporary local file
-            os.remove(local_path)
-
+            local_path = download_from_drive(filename, drive_service)
         except Exception as e:
-            # Log errors and update DB with error status
-            print(f"❌ Error transcribing {filename}: {e}")
-            supabase.table("audio_files").update({
-                "status": "error",
-                "error_message": str(e)
-            }).eq("filename", filename).execute()
+            log(f"❌ Failed to download {filename} from Drive: {e}")
+            supabase.table("audio_files").update({"status": "error"}).eq("id", file_id).execute()
+            continue
 
-    print("\n✅ Step 1 Complete: Transcription finished.")
+        text, lang = transcribe_audio(model, local_path)
+        if not text:
+            supabase.table("audio_files").update({"status": "error"}).eq("id", file_id).execute()
+            continue
 
-# --------------------------------------------
-# 🔁 Entry point
-# --------------------------------------------
-if __name__ == "__main__":
+        supabase.table("audio_files").update({
+            "status": "transcribed",
+            "transcription": text,
+            "language": lang,
+            "error_message": ""
+        }).eq("id", file_id).execute()
+
+        log(f"✅ Transcription complete for: {filename} — language: {lang}")
+
+        try:
+            os.remove(local_path)
+        except Exception as cleanup_err:
+            log(f"⚠️ Couldn't delete temp file: {cleanup_err}")
+
+    log("✅ Step Complete: Transcription and language detection finished.")
+
+if __name__ == '__main__':
     main()
