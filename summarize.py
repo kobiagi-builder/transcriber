@@ -1,4 +1,4 @@
-# summarize.py — FINAL patched version using cleaned_text and status=cleaned
+# summarize.py — strict prompt, robust parser, fallback models
 
 import os
 import sys
@@ -10,7 +10,7 @@ import config
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# === 🕒 Logger ===
+# === Logger ===
 def log(msg):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     formatted = f"[{timestamp}] {msg}"
@@ -21,61 +21,80 @@ def log(msg):
     except Exception as e:
         print(f"[Logger Error] Could not write to log.txt: {e}")
 
-# === 🔌 Init Supabase ===
+# === Supabase & OpenAI ===
 def init_supabase():
     return create_client(config.SUPABASE_URL, config.SUPABASE_API_KEY)
 
-# === 🔌 Init OpenAI ===
 openai.api_key = config.OPENAI_API_KEY
 
-# === 📄 Parse GPT Output ===
+# === Parser ===
 def parse_summary_output(output):
     try:
         lines = output.strip().split("\n")
         action_items, talking_points = [], []
         section = None
+
         for line in lines:
-            if "action items" in line.lower():
+            lowered = line.lower()
+            if "action items" in lowered:
                 section = "actions"
                 continue
-            elif "main talking points" in line.lower():
+            elif "main talking points" in lowered or "talking points" in lowered:
                 section = "points"
                 continue
             elif not line.strip():
                 continue
+
+            bullet = line.strip().lstrip("-*•").strip()
             if section == "actions":
-                action_items.append(line.strip("-• "))
+                action_items.append(bullet)
             elif section == "points":
-                talking_points.append(line.strip("-• "))
+                talking_points.append(bullet)
+
         return action_items, talking_points
     except Exception as e:
         log(f"⚠️ Failed to parse summary output: {e}")
         return [], []
 
-# === 🧠 Summarize Text ===
+# === GPT Call with Fallback ===
 def summarize_text(text):
     prompt = (
-        "You are a business productivity assistant. "
-        "Summarize the following text into two sections: Main Talking Points and Action Items.\n\n"
-        f"Text: \n{text}\n\n"
-        "Respond in markdown with clear bullet points under each section."
+        "You are a business meeting assistant. Summarize the following meeting transcription into "
+        "**two sections only**: Main Talking Points and Action Items.\n\n"
+        "**Respond in strict markdown format with this exact structure (the example include only two points but you can add as many points as needed):**\n\n"
+        "## Main Talking Points\n"
+        "- First point\n"
+        "- Second point\n\n"
+        "## Action Items\n"
+        "- First action\n"
+        "- Second action\n\n"
+        "Do not include any extra text or introduction.\n\n"
+        f"Meeting transcription:\n{text}"
     )
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
-        )
-        return response.choices[0].message.content.strip()
-    except OpenAIError as e:
-        log(f"❌ OpenAI API error: {e}")
-        return None
 
-# === 🚀 Main ===
+    models = ["gpt-4", "gpt-3.5-turbo-16k"]
+    for model in models:
+        try:
+            log(f"🧠 Using model: {model}")
+            response = openai.ChatCompletion.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.4,
+            )
+            return response.choices[0].message.content.strip()
+        except OpenAIError as e:
+            log(f"❌ OpenAI error with model {model}: {e}")
+            if "maximum context length" not in str(e) and "too many tokens" not in str(e):
+                break
+    return None
+
+# === Main ===
 def main():
     log("📦 Fetching records with status='cleaned' or 'summary_error'...")
     sb = init_supabase()
-    records = sb.table("audio_files").select("id, filename, cleaned_text, status").in_("status", ["cleaned", "summary_error"]).execute().data
+    records = sb.table("audio_files").select(
+        "id, filename, cleaned_text, status"
+    ).in_("status", ["cleaned", "summary_error"]).execute().data
 
     if not records:
         log("🟡 No cleaned records to summarize.")
@@ -109,6 +128,7 @@ def main():
             log(f"✅ Summary complete for: {filename}")
         else:
             log(f"⚠️ Failed to extract bullet points for {filename}, saving raw summary.")
+            log("📄 GPT returned:\n" + summary)
             sb.table("audio_files").update({
                 "status": "summary_error",
                 "full_summary": summary

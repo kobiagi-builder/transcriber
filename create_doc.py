@@ -1,4 +1,4 @@
-# create_doc.py — Final version to generate Google Docs from summaries
+# create_doc.py — Now includes cleaned_text in the Google Doc output
 
 import os
 import sys
@@ -10,7 +10,7 @@ import config
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# === 🕒 Logger ===
+# === Logger ===
 def log(msg):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f"[{timestamp}] {msg}")
@@ -20,7 +20,7 @@ def log(msg):
     except:
         pass
 
-# === 🔌 Supabase & Drive ===
+# === Services ===
 def init_supabase():
     return create_client(config.SUPABASE_URL, config.SUPABASE_API_KEY)
 
@@ -31,11 +31,14 @@ def init_drive_service():
     )
     return build("drive", "v3", credentials=creds), build("docs", "v1", credentials=creds)
 
-# === 📄 Generate Google Doc Content ===
-def build_doc_body(summary_points, action_items):
-    body = [
-        {"insertText": {"location": {"index": 1}, "text": "📝 Meeting Summary\n\n"}}
-    ]
+# === Google Doc Body Builder ===
+def build_doc_body(summary_points, action_items, cleaned_text=None):
+    body = []
+
+    if cleaned_text:
+        body.append({"insertText": {"location": {"index": 1}, "text": "Cleaned Transcript:\n"}})
+        body.append({"insertText": {"location": {"index": 1}, "text": f"{cleaned_text}\n\n"}})
+
     if summary_points:
         body.append({"insertText": {"location": {"index": 1}, "text": "Main Talking Points:\n"}})
         for point in summary_points:
@@ -46,16 +49,19 @@ def build_doc_body(summary_points, action_items):
         body.append({"insertText": {"location": {"index": 1}, "text": "Action Items:\n"}})
         for action in action_items:
             body.append({"insertText": {"location": {"index": 1}, "text": f"• {action}\n"}})
+        body.append({"insertText": {"location": {"index": 1}, "text": "\n"}})
 
-    return list(reversed(body))  # reversed so the first text ends up at top
+    return list(reversed(body))
 
-# === 🚀 Main ===
+# === Main Process ===
 def main():
     log("📦 Fetching records with status='summarized' or 'error'...")
     sb = init_supabase()
     drive_service, docs_service = init_drive_service()
 
-    records = sb.table("audio_files").select("id, filename, summary_points, action_items, full_summary, status").in_("status", ["summarized", "error"]).execute().data
+    records = sb.table("audio_files").select(
+        "id, filename, summary_points, action_items, full_summary, cleaned_text, status"
+    ).in_("status", ["summarized", "error"]).execute().data
 
     if not records:
         log("🟡 No summarized records to process.")
@@ -67,6 +73,7 @@ def main():
         summary = record.get("full_summary")
         points = record.get("summary_points")
         actions = record.get("action_items")
+        cleaned_text = record.get("cleaned_text")
 
         if not (summary and points and actions):
             log(f"⚠️ Skipping {filename} — missing required fields.")
@@ -78,7 +85,7 @@ def main():
             doc = docs_service.documents().create(body={"title": doc_title}).execute()
             doc_id = doc["documentId"]
 
-            requests = build_doc_body(points, actions)
+            requests = build_doc_body(points, actions, cleaned_text)
             docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
 
             # Optionally move the file to a Drive folder

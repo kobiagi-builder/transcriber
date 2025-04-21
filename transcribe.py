@@ -78,7 +78,7 @@ def transcribe_audio(model, file_path):
 # === 🚀 MAIN ===
 def main():
     log("🎙️ Loading Whisper model...")
-    model = whisper.load_model("large-v3")  # or "medium" for CPU-friendly
+    model = whisper.load_model("medium")  # or "medium" for CPU-friendly
 
     log("📦 Connecting to Supabase...")
     supabase = init_supabase()
